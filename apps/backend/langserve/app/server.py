@@ -24,21 +24,21 @@ from langchain.agents import AgentExecutor, Tool, create_openai_tools_agent
 
 ### uncomment this section to run server in local host #########
 
-# from pathlib import Path
-# from dotenv import load_dotenv
-# # Calculate the path three directories above the current script
-# library_path = Path(__file__).resolve().parents[4]
-# sys.path.append(str(library_path))
-# load_dotenv(str(library_path) + "/credentials.env")
-# os.environ["AZURE_OPENAI_MODEL_NAME"] = os.environ["GPT4_DEPLOYMENT_NAME"]
+from pathlib import Path
+from dotenv import load_dotenv
+# Calculate the path three directories above the current script
+library_path = Path(__file__).resolve().parents[4]
+sys.path.append(str(library_path))
+load_dotenv(str(library_path) + "/credentials.env")
+os.environ["AZURE_OPENAI_MODEL_NAME"] = os.environ["GPT4_DEPLOYMENT_NAME"]
 
 ###################################
 
 from common.utils import (
     DocSearchAgent, 
-    CSVTabularAgent, 
-    SQLSearchAgent, 
-    ChatGPTTool, 
+    # CSVTabularAgent, 
+    # SQLSearchAgent, 
+    # ChatGPTTool, 
     BingSearchAgent
 )
 from common.prompts import CUSTOM_CHATBOT_PROMPT, WELCOME_MESSAGE
@@ -138,7 +138,7 @@ def get_session_history(session_id: str, user_id: str) -> CosmosDBChatMessageHis
 llm = AzureChatOpenAI(deployment_name=os.environ.get("AZURE_OPENAI_MODEL_NAME"), temperature=0, max_tokens=1500, streaming=True)
 
 # Initialize our Tools/Experts
-doc_indexes = ["cogsrch-index-files", "cogsrch-index-csv"]
+doc_indexes = ["servicenow"]
 
 doc_search = DocSearchAgent(llm=llm, indexes=doc_indexes,
                    k=6, reranker_th=1,
@@ -149,12 +149,12 @@ doc_search = DocSearchAgent(llm=llm, indexes=doc_indexes,
 
 book_indexes = ["cogsrch-index-books"]
 
-book_search = DocSearchAgent(llm=llm, indexes=book_indexes,
-                   k=6, reranker_th=1,
-                   sas_token=os.environ['BLOB_SAS_TOKEN'],
-                   name="booksearch",
-                   description="useful when the questions includes the term: booksearch",
-                   verbose=False)
+# book_search = DocSearchAgent(llm=llm, indexes=book_indexes,
+#                    k=6, reranker_th=1,
+#                    sas_token=os.environ['BLOB_SAS_TOKEN'],
+#                    name="booksearch",
+#                    description="useful when the questions includes the term: booksearch",
+#                    verbose=False)
 
 
 www_search = BingSearchAgent(llm=llm, k=10,
@@ -162,17 +162,18 @@ www_search = BingSearchAgent(llm=llm, k=10,
                              description="useful when the questions includes the term: bing",
                              verbose=False)
 
-sql_search = SQLSearchAgent(llm=llm, k=30,
-                    name="sqlsearch",
-                    description="useful when the questions includes the term: sqlsearch",
-                    verbose=False)
+# sql_search = SQLSearchAgent(llm=llm, k=30,
+#                     name="sqlsearch",
+#                     description="useful when the questions includes the term: sqlsearch",
+#                     verbose=False)
 
-chatgpt_search = ChatGPTTool(llm=llm,
-                     name="chatgpt",
-                    description="useful when the questions includes the term: chatgpt",
-                    verbose=False)
+# chatgpt_search = ChatGPTTool(llm=llm,
+#                      name="chatgpt",
+#                     description="useful when the questions includes the term: chatgpt",
+#                     verbose=False)
 
-tools = [doc_search, book_search, www_search, sql_search, chatgpt_search]
+# tools = [doc_search, book_search, www_search, sql_search, chatgpt_search]
+tools = [doc_search, www_search]
 
 # Create the brain Agent
 
@@ -211,8 +212,8 @@ class Input(TypedDict):
 class Output(BaseModel):
     output: Any
 
-# Add API route
 
+# Add API route
 add_routes(
     app,
     brain_agent_executor.with_types(input_type=Input, output_type=Output),
@@ -221,7 +222,7 @@ add_routes(
 
 
 
-###################### Run the server
+# ###################### Run the server
 
 if __name__ == "__main__":
     import uvicorn
