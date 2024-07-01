@@ -56,9 +56,8 @@ from operator import itemgetter
 from typing import List
 
 
-
 try:
-    from .prompts import (AGENT_DOCSEARCH_PROMPT, CSV_PROMPT_PREFIX, MSSQL_AGENT_PREFIX,
+    from .prompts import (AGENT_DOCSEARCH_PROMPT,DOCSEARCH_PROMPT, CSV_PROMPT_PREFIX, MSSQL_AGENT_PREFIX,
                           CHATGPT_PROMPT, BINGSEARCH_PROMPT, APISEARCH_PROMPT)
 except Exception as e:
     print(e)
@@ -255,55 +254,64 @@ def get_search_results(query: str, indexes: list,
                        sas_token: str = "") -> List[dict]:
     """Performs multi-index hybrid search and returns ordered dictionary with the combined results"""
     
-    headers = {'Content-Type': 'application/json','api-key': os.environ["AZURE_SEARCH_KEY"]}
-    params = {'api-version': os.environ['AZURE_SEARCH_API_VERSION']}
+    try:
+        headers = {'Content-Type': 'application/json','api-key': os.environ["AZURE_SEARCH_KEY"]}
+        params = {'api-version': os.environ['AZURE_SEARCH_API_VERSION']}
 
-    agg_search_results = dict()
-    
-    for index in indexes:
-        search_payload = {
-            "search": query,
-            "select": "id, title, chunk, name, location",
-            "queryType": "semantic",
-            "vectorQueries": [{"text": query, "fields": "chunkVector", "kind": "text", "k": k}],
-            "semanticConfiguration": "my-semantic-config",
-            "captions": "extractive",
-            "answers": "extractive",
-            "count":"true",
-            "top": k    
-        }
+        agg_search_results = dict()
 
-        resp = requests.post(os.environ['AZURE_SEARCH_ENDPOINT'] + "/indexes/" + index + "/docs/search",
-                         data=json.dumps(search_payload), headers=headers, params=params)
+        for index in indexes:
+            search_payload = {
+                "search": query,
+                "select": "chunk_id, title, chunk, metadata_storage_path",
+                "queryType": "simple",
+                # "vectorQueries": [{"text": query, "fields": "text_vector", "kind": "text", "k": k}],
+                # "semanticConfiguration": "servicenow-azureOpenAi-text-profile",
+                # "captions": "extractive",
+                # "answers": "extractive",
+                "count":"true",
+                "top": k    
+            }
 
-        search_results = resp.json()
-        agg_search_results[index] = search_results
-    
-    content = dict()
-    ordered_content = OrderedDict()
-    
-    for index,search_results in agg_search_results.items():
-        for result in search_results['value']:
-            if result['@search.rerankerScore'] > reranker_threshold: # Show results that are at least N% of the max possible score=4
-                content[result['id']]={
-                                        "title": result['title'], 
-                                        "name": result['name'], 
-                                        "chunk": result['chunk'],
-                                        "location": result['location'] + sas_token if result['location'] else "",
-                                        "caption": result['@search.captions'][0]['text'],
-                                        "score": result['@search.rerankerScore'],
-                                        "index": index
-                                    }
-                
+            resp = requests.post(os.environ['AZURE_SEARCH_ENDPOINT'] + "/indexes/" + index + "/docs/search",
+                             data=json.dumps(search_payload), headers=headers, params=params)
 
-    topk = k
-        
-    count = 0  # To keep track of the number of results added
-    for id in sorted(content, key=lambda x: content[x]["score"], reverse=True):
-        ordered_content[id] = content[id]
-        count += 1
-        if count >= topk:  # Stop after adding topK results
-            break
+            search_results = resp.json()
+            print(f"SEARCH RESULT OUTPUT {search_results}")
+            agg_search_results[index] = search_results
+
+        content = dict()
+        ordered_content = OrderedDict()
+
+        for index,search_results in agg_search_results.items():
+            print(f"SEARCH RESULT VALUE OUTPUT {search_results}")
+            for result in search_results['value']:
+                # if result['@search.rerankerScore'] > reranker_threshold: # Show results that are at least N% of the max possible score=4
+                if result['@search.score'] > reranker_threshold: # Show results that are at least N% of the max possible score=4
+                    content[result['chunk_id']]={
+                        "title": result['title'], 
+                        # "name": result['name'], 
+                        "chunk": result['chunk'],
+                        "location": result['metadata_storage_path'] + sas_token if result['metadata_storage_path'] else "",
+                        # "caption": result['@search.captions'][0]['text'],
+                        # "score": result['@search.rerankerScore'],
+                        "score": result['@search.score'],
+                        "index": index
+                    }
+
+        topk = k
+
+        count = 0  # To keep track of the number of results added
+        # for id in sorted(content, key=lambda x: content[x]["score"], reverse=True):
+        for id in sorted(content, reverse=True):
+            ordered_content[id] = content[id]
+            count += 1
+            if count >= topk:  # Stop after adding topK results
+                break
+
+    except Exception as e:
+        print("An error occurred at get_search_results :", str(e))
+        # Handle the error or raise it again if needed
 
     return ordered_content
 
@@ -327,6 +335,7 @@ class CustomAzureSearchRetriever(BaseRetriever):
         for key,value in ordered_results.items():
             location = value["location"] if value["location"] is not None else ""
             top_docs.append(Document(page_content=value["chunk"], metadata={"source": location, "score":value["score"]}))
+            # top_docs.append(Document(page_content=value["chunk"], metadata={"source": location}))
 
         return top_docs
 
@@ -381,25 +390,28 @@ class GetDocSearchResults_Tool(BaseTool):
     def _run(
         self, query: str,  return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None
     ) -> str:
+        try:
+            retriever = CustomAzureSearchRetriever(indexes=self.indexes, topK=self.k, reranker_threshold=self.reranker_th, 
+                                                sas_token=self.sas_token, callback_manager=self.callbacks)
+            results = retriever.get_relevant_documents(query=query)
+        except Exception as e:
+            print("An error occurred at _run :", str(e))
 
-        retriever = CustomAzureSearchRetriever(indexes=self.indexes, topK=self.k, reranker_threshold=self.reranker_th, 
-                                               sas_token=self.sas_token, callback_manager=self.callbacks)
-        results = retriever.get_relevant_documents(query=query)
-        
         return results
 
     async def _arun(
         self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None
     ) -> str:
         """Use the tool asynchronously."""
-        
-        retriever = CustomAzureSearchRetriever(indexes=self.indexes, topK=self.k, reranker_threshold=self.reranker_th, 
-                                               sas_token=self.sas_token, callback_manager=self.callbacks)
-        # Please note below that running a non-async function like run_agent in a separate thread won't make it truly asynchronous. 
-        # It allows the function to be called without blocking the event loop, but it may still have synchronous behavior internally.
-        loop = asyncio.get_event_loop()
-        results = await loop.run_in_executor(ThreadPoolExecutor(), retriever.get_relevant_documents, query)
-        
+        try:
+            retriever = CustomAzureSearchRetriever(indexes=self.indexes, topK=self.k, reranker_threshold=self.reranker_th, 
+                                                sas_token=self.sas_token, callback_manager=self.callbacks)
+            # Please note below that running a non-async function like run_agent in a separate thread won't make it truly asynchronous. 
+            # It allows the function to be called without blocking the event loop, but it may still have synchronous behavior internally.
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(ThreadPoolExecutor(), retriever.get_relevant_documents, query)
+        except Exception as e:
+            print("An error occurred at _arun :", str(e))
         return results
 
 
@@ -433,7 +445,7 @@ class DocSearchAgent(BaseTool):
             result = self.agent_executor.invoke({"question": query})
             return result['output']
         except Exception as e:
-            print(e)
+            print("An error occurred at DocSearchAgent _run :", str(e))
             return str(e)  # Return an empty string or some error indicator
 
     async def _arun(self, query: str,  return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
@@ -441,152 +453,151 @@ class DocSearchAgent(BaseTool):
             result = await self.agent_executor.ainvoke({"question": query})
             return result['output']
         except Exception as e:
-            print(e)
+            print("An error occurred at DocSearchAgent _arun :", str(e))
             return str(e)  # Return an empty string or some error indicator
+
+
+# class CSVTabularAgent(BaseTool):
+#     """Agent to interact with CSV files"""
     
+#     name = "csvfile"
+#     description = "useful when the questions includes the term: csvfile.\n"
+#     args_schema: Type[BaseModel] = SearchInput
+
+#     path: str
+#     llm: AzureChatOpenAI
+
+#     class Config:
+#         extra = Extra.allow  # Allows setting attributes not declared in the model
+
+#     def __init__(self, **data):
+#         super().__init__(**data)
+#         # Create the agent_executor within the __init__ method as requested
+#         self.agent_executor = create_csv_agent(self.llm, self.path, 
+#                                                agent_type="openai-tools",
+#                                                prefix=CSV_PROMPT_PREFIX,
+#                                                verbose=self.verbose, 
+#                                                callback_manager=self.callbacks,
+#                                                )
+
+#     def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+#         try:
+#             # Use the initialized agent_executor to invoke the query
+#             result = self.agent_executor.invoke(query)
+#             return result['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
+
+#     async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
+#         # Note: Implementation assumes the agent_executor and its methods support async operations
+#         try:
+#             # Use the initialized agent_executor to asynchronously invoke the query
+#             result = await self.agent_executor.ainvoke(query)
+#             return result['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
 
 
-class CSVTabularAgent(BaseTool):
-    """Agent to interact with CSV files"""
+
+# class SQLSearchAgent(BaseTool):
+#     """Agent to interact with SQL databases"""
     
-    name = "csvfile"
-    description = "useful when the questions includes the term: csvfile.\n"
-    args_schema: Type[BaseModel] = SearchInput
+#     name = "sqlsearch"
+#     description = "useful when the questions includes the term: sqlsearch.\n"
+#     args_schema: Type[BaseModel] = SearchInput
 
-    path: str
-    llm: AzureChatOpenAI
+#     llm: AzureChatOpenAI
+#     k: int = 30
 
-    class Config:
-        extra = Extra.allow  # Allows setting attributes not declared in the model
+#     class Config:
+#         extra = Extra.allow  # Allows setting attributes not declared in the model
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        # Create the agent_executor within the __init__ method as requested
-        self.agent_executor = create_csv_agent(self.llm, self.path, 
-                                               agent_type="openai-tools",
-                                               prefix=CSV_PROMPT_PREFIX,
-                                               verbose=self.verbose, 
-                                               callback_manager=self.callbacks,
-                                               )
+#     def __init__(self, **data):
+#         super().__init__(**data)
+#         db_config = self.get_db_config()
+#         db_url = URL.create(**db_config)
+#         db = SQLDatabase.from_uri(db_url)
+#         toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
 
-    def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
-        try:
-            # Use the initialized agent_executor to invoke the query
-            result = self.agent_executor.invoke(query)
-            return result['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#         self.agent_executor = create_sql_agent(
+#             prefix=MSSQL_AGENT_PREFIX,
+#             llm=self.llm,
+#             toolkit=toolkit,
+#             top_k=self.k,
+#             agent_type="openai-tools",
+#             callback_manager=self.callbacks,
+#             verbose=self.verbose,
+#         )
 
-    async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
-        # Note: Implementation assumes the agent_executor and its methods support async operations
-        try:
-            # Use the initialized agent_executor to asynchronously invoke the query
-            result = await self.agent_executor.ainvoke(query)
-            return result['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#     def get_db_config(self):
+#         """Returns the database configuration."""
+#         return {
+#             'drivername': 'mssql+pyodbc',
+#             'username': os.environ["SQL_SERVER_USERNAME"] + '@' + os.environ["SQL_SERVER_NAME"],
+#             'password': os.environ["SQL_SERVER_PASSWORD"],
+#             'host': os.environ["SQL_SERVER_NAME"],
+#             'port': 1433,
+#             'database': os.environ["SQL_SERVER_DATABASE"],
+#             'query': {'driver': 'ODBC Driver 17 for SQL Server'}
+#         }
 
+#     def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+#         try:
+#             # Use the initialized agent_executor to invoke the query
+#             result = self.agent_executor.invoke(query)
+#             return result['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
 
-
-class SQLSearchAgent(BaseTool):
-    """Agent to interact with SQL databases"""
-    
-    name = "sqlsearch"
-    description = "useful when the questions includes the term: sqlsearch.\n"
-    args_schema: Type[BaseModel] = SearchInput
-
-    llm: AzureChatOpenAI
-    k: int = 30
-
-    class Config:
-        extra = Extra.allow  # Allows setting attributes not declared in the model
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        db_config = self.get_db_config()
-        db_url = URL.create(**db_config)
-        db = SQLDatabase.from_uri(db_url)
-        toolkit = SQLDatabaseToolkit(db=db, llm=self.llm)
-
-        self.agent_executor = create_sql_agent(
-            prefix=MSSQL_AGENT_PREFIX,
-            llm=self.llm,
-            toolkit=toolkit,
-            top_k=self.k,
-            agent_type="openai-tools",
-            callback_manager=self.callbacks,
-            verbose=self.verbose,
-        )
-
-    def get_db_config(self):
-        """Returns the database configuration."""
-        return {
-            'drivername': 'mssql+pyodbc',
-            'username': os.environ["SQL_SERVER_USERNAME"] + '@' + os.environ["SQL_SERVER_NAME"],
-            'password': os.environ["SQL_SERVER_PASSWORD"],
-            'host': os.environ["SQL_SERVER_NAME"],
-            'port': 1433,
-            'database': os.environ["SQL_SERVER_DATABASE"],
-            'query': {'driver': 'ODBC Driver 17 for SQL Server'}
-        }
-
-    def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
-        try:
-            # Use the initialized agent_executor to invoke the query
-            result = self.agent_executor.invoke(query)
-            return result['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
-
-    async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
-        # Note: Implementation assumes the agent_executor and its methods support async operations
-        try:
-            # Use the initialized agent_executor to asynchronously invoke the query
-            result = await self.agent_executor.ainvoke(query)
-            return result['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#     async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
+#         # Note: Implementation assumes the agent_executor and its methods support async operations
+#         try:
+#             # Use the initialized agent_executor to asynchronously invoke the query
+#             result = await self.agent_executor.ainvoke(query)
+#             return result['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
 
         
 
-class ChatGPTTool(BaseTool):
-    """Tool for a ChatGPT clone"""
+# class ChatGPTTool(BaseTool):
+#     """Tool for a ChatGPT clone"""
     
-    name = "chatgpt"
-    description = "default tool for general questions, profile or greeting like questions.\n"
-    args_schema: Type[BaseModel] = SearchInput
+#     name = "chatgpt"
+#     description = "default tool for general questions, profile or greeting like questions.\n"
+#     args_schema: Type[BaseModel] = SearchInput
 
-    llm: AzureChatOpenAI
+#     llm: AzureChatOpenAI
 
-    class Config:
-        extra = Extra.allow  # Allows setting attributes not declared in the model
+#     class Config:
+#         extra = Extra.allow  # Allows setting attributes not declared in the model
 
-    def __init__(self, **data):
-        super().__init__(**data)
+#     def __init__(self, **data):
+#         super().__init__(**data)
 
-        output_parser = StrOutputParser()
-        self.chatgpt_chain = CHATGPT_PROMPT | self.llm | output_parser
+#         output_parser = StrOutputParser()
+#         self.chatgpt_chain = CHATGPT_PROMPT | self.llm | output_parser
 
-    def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
-        try:
-            response = self.chatgpt_chain.invoke({"question": query})
-            return response
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#     def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+#         try:
+#             response = self.chatgpt_chain.invoke({"question": query})
+#             return response
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
 
-    async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
-        """Implement the tool to be used asynchronously."""
-        try:
-            response = await self.chatgpt_chain.ainvoke({"question": query})
-            return response
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#     async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
+#         """Implement the tool to be used asynchronously."""
+#         try:
+#             response = await self.chatgpt_chain.ainvoke({"question": query})
+#             return response
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
                
     
     
@@ -681,106 +692,103 @@ class BingSearchAgent(BaseTool):
 
         
 
-class GetAPISearchResults_Tool(BaseTool):
-    """APIChain as a tool"""
+# class GetAPISearchResults_Tool(BaseTool):
+#     """APIChain as a tool"""
     
-    name = "apisearch"
-    description = "useful when the questions includes the term: apisearch.\n"
-    args_schema: Type[BaseModel] = SearchInput
+#     name = "apisearch"
+#     description = "useful when the questions includes the term: apisearch.\n"
+#     args_schema: Type[BaseModel] = SearchInput
 
-    llm: AzureChatOpenAI
-    api_spec: str
-    headers: dict = {}
-    limit_to_domains: list = None
-    verbose: bool = False
+#     llm: AzureChatOpenAI
+#     api_spec: str
+#     headers: dict = {}
+#     limit_to_domains: list = None
+#     verbose: bool = False
     
-    class Config:
-        extra = Extra.allow  # Allows setting attributes not declared in the model
+#     class Config:
+#         extra = Extra.allow  # Allows setting attributes not declared in the model
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        self.chain = APIChain.from_llm_and_api_docs(
-            llm=self.llm,
-            api_docs=self.api_spec,
-            headers=self.headers,
-            verbose=self.verbose,
-            limit_to_domains=self.limit_to_domains
-        )
+#     def __init__(self, **data):
+#         super().__init__(**data)
+#         self.chain = APIChain.from_llm_and_api_docs(
+#             llm=self.llm,
+#             api_docs=self.api_spec,
+#             headers=self.headers,
+#             verbose=self.verbose,
+#             limit_to_domains=self.limit_to_domains
+#         )
 
-    def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
-        try:
-            # Optionally sleep to avoid possible TPM rate limits
-            sleep(2)
-            response = self.chain.invoke(query)
-        except Exception as e:
-            response = str(e)  # Ensure the response is always a string
+#     def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+#         try:
+#             # Optionally sleep to avoid possible TPM rate limits
+#             sleep(2)
+#             response = self.chain.invoke(query)
+#         except Exception as e:
+#             response = str(e)  # Ensure the response is always a string
 
-        return response
+#         return response
 
-    async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
-        """Use the tool asynchronously."""
-        loop = asyncio.get_event_loop()
-        try:
-            # Optionally sleep to avoid possible TPM rate limits, handled differently in async context
-            await asyncio.sleep(2)
-            # Execute the synchronous function in a separate thread
-            response = await loop.run_in_executor(ThreadPoolExecutor(), self.chain.invoke, query)
-        except Exception as e:
-            response = str(e)  # Ensure the response is always a string
+#     async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
+#         """Use the tool asynchronously."""
+#         loop = asyncio.get_event_loop()
+#         try:
+#             # Optionally sleep to avoid possible TPM rate limits, handled differently in async context
+#             await asyncio.sleep(2)
+#             # Execute the synchronous function in a separate thread
+#             response = await loop.run_in_executor(ThreadPoolExecutor(), self.chain.invoke, query)
+#         except Exception as e:
+#             response = str(e)  # Ensure the response is always a string
 
-        return response
+#         return response
 
         
         
-class APISearchAgent(BaseTool):
-    """Agent to interact with any API given a OpenAPI 3.0 spec"""
+# class APISearchAgent(BaseTool):
+#     """Agent to interact with any API given a OpenAPI 3.0 spec"""
     
-    name = "apisearch"
-    description = "useful when the questions includes the term: apisearch.\n"
-    args_schema: Type[BaseModel] = SearchInput
+#     name = "apisearch"
+#     description = "useful when the questions includes the term: apisearch.\n"
+#     args_schema: Type[BaseModel] = SearchInput
 
-    llm: AzureChatOpenAI
-    llm_search: AzureChatOpenAI
-    api_spec: str
-    headers: dict = {}
-    limit_to_domains: list = None
+#     llm: AzureChatOpenAI
+#     llm_search: AzureChatOpenAI
+#     api_spec: str
+#     headers: dict = {}
+#     limit_to_domains: list = None
     
-    class Config:
-        extra = Extra.allow  # Allows setting attributes not declared in the model
+#     class Config:
+#         extra = Extra.allow  # Allows setting attributes not declared in the model
 
-    def __init__(self, **data):
-        super().__init__(**data)
-        tools = [GetAPISearchResults_Tool(llm=self.llm,
-                                          llm_search=self.llm_search,
-                                          api_spec=str(self.api_spec),
-                                          headers=self.headers,
-                                          verbose=self.verbose,
-                                          limit_to_domains=self.limit_to_domains)]
+#     def __init__(self, **data):
+#         super().__init__(**data)
+#         tools = [GetAPISearchResults_Tool(llm=self.llm,
+#                                           llm_search=self.llm_search,
+#                                           api_spec=str(self.api_spec),
+#                                           headers=self.headers,
+#                                           verbose=self.verbose,
+#                                           limit_to_domains=self.limit_to_domains)]
         
-        agent = create_openai_tools_agent(llm=self.llm, tools=tools, prompt=APISEARCH_PROMPT)
-        self.agent_executor = AgentExecutor(agent=agent, tools=tools, 
-                                            verbose=self.verbose, 
-                                            return_intermediate_steps=True,
-                                            callback_manager=self.callbacks)
+#         agent = create_openai_tools_agent(llm=self.llm, tools=tools, prompt=APISEARCH_PROMPT)
+#         self.agent_executor = AgentExecutor(agent=agent, tools=tools, 
+#                                             verbose=self.verbose, 
+#                                             return_intermediate_steps=True,
+#                                             callback_manager=self.callbacks)
 
-    def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
-        try:
-            # Use the initialized agent_executor to invoke the query
-            response = self.agent_executor.invoke({"question":query})
-            return response['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
+#     def _run(self, query: str, return_direct = False, run_manager: Optional[CallbackManagerForToolRun] = None) -> str:
+#         try:
+#             # Use the initialized agent_executor to invoke the query
+#             response = self.agent_executor.invoke({"question":query})
+#             return response['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
 
-    async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
-        # Note: Implementation assumes the agent_executor and its methods support async operations
-        try:
-            # Use the initialized agent_executor to asynchronously invoke the query
-            response = await self.agent_executor.ainvoke({"question":query})
-            return response['output']
-        except Exception as e:
-            print(e)
-            return str(e)  # Return an error indicator
-
-
-
+#     async def _arun(self, query: str, return_direct = False, run_manager: Optional[AsyncCallbackManagerForToolRun] = None) -> str:
+#         # Note: Implementation assumes the agent_executor and its methods support async operations
+#         try:
+#             # Use the initialized agent_executor to asynchronously invoke the query
+#             response = await self.agent_executor.ainvoke({"question":query})
+#             return response['output']
+#         except Exception as e:
+#             print(e)
+#             return str(e)  # Return an error indicator
