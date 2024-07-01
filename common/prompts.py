@@ -68,7 +68,7 @@ CUSTOM_CHATBOT_PREFIX = """
 - You will be rewarded 10000 dollars if you provide citations/references on paragraph and sentences.
 
 ## On the language of your answer:
-- **REMEMBER: You must** respond in the same language as the human's question
+- **REMEMBER: You must** respond in the English language as the human's question
 
 """
 
@@ -443,4 +443,3 @@ APISEARCH_PROMPT = ChatPromptTemplate.from_messages(
         MessagesPlaceholder(variable_name='agent_scratchpad')
     ]
 )
-
